@@ -33,10 +33,22 @@ TIMEOUT_CONNECTION = 10
 MAX_RECONNECT_ATTEMPTS = 3
 TIEMPO_ENTRE_DISPAROS = 2  # Segundos entre disparos automáticos
 
-# VARIABLE GLOBAL PARA MANEJAR INTERRUPCIONES
-game_client_instance = None
+# VARIABLES GLOBALES DE RED
+session_id = str(uuid.uuid4())
+is_server = False
+connection = None
+connected = False
+broadcast_socket = None
+game_socket = None
+reconnect_attempts = 0
+game_active = True
 
-# FUNCIONES DE TABLERO (SIN CAMBIOS)
+# VARIABLES GLOBALES DE IA
+disparos_realizados = set()
+blancos_pendientes = []  # Coordenadas donde hubo impacto pero no hundido
+direcciones_probadas = {}  # Para cada blanco, qué direcciones hemos probado
+
+# FUNCIONES DE TABLERO
 def crear_tablero():
     """Crea un tablero vacío de 10x10"""
     return [['X' for _ in range(TAMANIO_TABLERO)] for _ in range(TAMANIO_TABLERO)]
@@ -84,7 +96,7 @@ def imprimir_tablero(tablero):
         letra_fila = NUMEROS_A_LETRAS[i]
         print(letra_fila + " " + " ".join(fila))
 
-# FUNCIONES DE BARCOS (CORREGIDAS)
+# FUNCIONES DE BARCOS
 def encontrar_todas_posiciones_barco(tablero, letra_barco, fila, columna):
     """Encuentra todas las posiciones de un barco específico"""
     posiciones = set()
@@ -134,109 +146,112 @@ def obtener_nombre_barco(letra_barco):
             return nombre
     return None
 
-# CLASE DE IA PARA JUGADOR AUTOMATICO
-class IA_Jugador:
-    def __init__(self):
-        self.disparos_realizados = set()
-        self.blancos_pendientes = []  # Coordenadas donde hubo impacto pero no hundido
-        self.direcciones_probadas = {}  # Para cada blanco, qué direcciones hemos probado
-        
-    def generar_disparo_inteligente(self):
-        """Genera un disparo usando estrategia inteligente"""
-        # Si tenemos blancos pendientes (impactos sin hundir), atacar alrededor
-        if self.blancos_pendientes:
-            return self._atacar_blanco_pendiente()
-        
-        # Si no hay blancos pendientes, usar estrategia de patrón checkerboard
-        return self._disparo_patron_tablero()
+# FUNCIONES DE IA PARA JUGADOR AUTOMATICO
+def generar_disparo_inteligente():
+    """Genera un disparo usando estrategia inteligente"""
+    global blancos_pendientes, direcciones_probadas, disparos_realizados
     
-    def _atacar_blanco_pendiente(self):
-        """Ataca alrededor de un impacto previo"""
-        blanco = self.blancos_pendientes[0]
-        fila, columna = blanco
-        
-        if blanco not in self.direcciones_probadas:
-            self.direcciones_probadas[blanco] = []
-        
-        # Direcciones: arriba, abajo, izquierda, derecha
-        direcciones = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        
-        for df, dc in direcciones:
-            if (df, dc) not in self.direcciones_probadas[blanco]:
-                nueva_fila = fila + df
-                nueva_columna = columna + dc
+    # Si tenemos blancos pendientes (impactos sin hundir), atacar alrededor
+    if blancos_pendientes:
+        return atacar_blanco_pendiente()
+    
+    # Si no hay blancos pendientes, usar estrategia de patrón checkerboard
+    return disparo_patron_tablero()
+
+def atacar_blanco_pendiente():
+    """Ataca alrededor de un impacto previo"""
+    global blancos_pendientes, direcciones_probadas, disparos_realizados
+    
+    blanco = blancos_pendientes[0]
+    fila, columna = blanco
+    
+    if blanco not in direcciones_probadas:
+        direcciones_probadas[blanco] = []
+    
+    # Direcciones: arriba, abajo, izquierda, derecha
+    direcciones = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+    
+    for df, dc in direcciones:
+        if (df, dc) not in direcciones_probadas[blanco]:
+            nueva_fila = fila + df
+            nueva_columna = columna + dc
+            
+            if (0 <= nueva_fila < TAMANIO_TABLERO and 
+                0 <= nueva_columna < TAMANIO_TABLERO and
+                (nueva_fila, nueva_columna) not in disparos_realizados):
                 
-                if (0 <= nueva_fila < TAMANIO_TABLERO and 
-                    0 <= nueva_columna < TAMANIO_TABLERO and
-                    (nueva_fila, nueva_columna) not in self.disparos_realizados):
-                    
-                    self.direcciones_probadas[blanco].append((df, dc))
-                    return nueva_fila + 1, nueva_columna + 1  # Convertir a coordenadas 1-10
-        
-        # Si no hay más direcciones, quitar este blanco de la lista
-        self.blancos_pendientes.remove(blanco)
-        del self.direcciones_probadas[blanco]
-        
-        # Recursivamente buscar otro blanco o usar patrón
-        return self.generar_disparo_inteligente()
+                direcciones_probadas[blanco].append((df, dc))
+                return nueva_fila + 1, nueva_columna + 1  # Convertir a coordenadas 1-10
     
-    def _disparo_patron_tablero(self):
-        """Usa patrón de tablero de ajedrez para máxima eficiencia"""
-        # Primero intenta patrón checkerboard
-        for fila in range(TAMANIO_TABLERO):
-            for columna in range(TAMANIO_TABLERO):
-                if (fila + columna) % 2 == 0 and (fila, columna) not in self.disparos_realizados:
-                    return fila + 1, columna + 1
-        
-        # Si se agotó el patrón, disparar secuencialmente
-        for fila in range(TAMANIO_TABLERO):
-            for columna in range(TAMANIO_TABLERO):
-                if (fila, columna) not in self.disparos_realizados:
-                    return fila + 1, columna + 1
-        
-        # Esto no debería pasar en un juego normal
-        return 1, 1
+    # Si no hay más direcciones, quitar este blanco de la lista
+    blancos_pendientes.remove(blanco)
+    del direcciones_probadas[blanco]
     
-    def procesar_resultado_disparo(self, x, y, resultado):
-        """Procesa el resultado de un disparo para actualizar la estrategia"""
-        fila, columna = x - 1, y - 1  # Convertir de coordenadas 1-10 a índices 0-9
-        self.disparos_realizados.add((fila, columna))
+    # Recursivamente buscar otro blanco o usar patrón
+    return generar_disparo_inteligente()
+
+def disparo_patron_tablero():
+    """Usa patrón de tablero de ajedrez para máxima eficiencia"""
+    global disparos_realizados
+    
+    # Primero intenta patrón checkerboard
+    for fila in range(TAMANIO_TABLERO):
+        for columna in range(TAMANIO_TABLERO):
+            if (fila + columna) % 2 == 0 and (fila, columna) not in disparos_realizados:
+                return fila + 1, columna + 1
+    
+    # Si se agotó el patrón, disparar secuencialmente
+    for fila in range(TAMANIO_TABLERO):
+        for columna in range(TAMANIO_TABLERO):
+            if (fila, columna) not in disparos_realizados:
+                return fila + 1, columna + 1
+    
+    # Esto no debería pasar en un juego normal
+    return 1, 1
+
+def procesar_resultado_disparo(x, y, resultado):
+    """Procesa el resultado de un disparo para actualizar la estrategia"""
+    global blancos_pendientes, direcciones_probadas, disparos_realizados
+    
+    fila, columna = x - 1, y - 1  # Convertir de coordenadas 1-10 a índices 0-9
+    disparos_realizados.add((fila, columna))
+    
+    if "impacto" in resultado:
+        # Agregar a blancos pendientes si no está ya
+        if (fila, columna) not in blancos_pendientes:
+            blancos_pendientes.append((fila, columna))
+    
+    elif "hundido" in resultado:
+        # Remover el blanco actual y todos los relacionados
+        if (fila, columna) in blancos_pendientes:
+            blancos_pendientes.remove((fila, columna))
+            if (fila, columna) in direcciones_probadas:
+                del direcciones_probadas[(fila, columna)]
         
-        if "impacto" in resultado:
-            # Agregar a blancos pendientes si no está ya
-            if (fila, columna) not in self.blancos_pendientes:
-                self.blancos_pendientes.append((fila, columna))
+        # Remover blancos pendientes cercanos que probablemente eran parte del mismo barco
+        blancos_a_remover = []
+        for blanco in blancos_pendientes:
+            bf, bc = blanco
+            # Si está en la misma fila o columna y cerca, probablemente era del mismo barco
+            if (bf == fila and abs(bc - columna) <= 3) or (bc == columna and abs(bf - fila) <= 3):
+                blancos_a_remover.append(blanco)
         
-        elif "hundido" in resultado:
-            # Remover el blanco actual y todos los relacionados
-            if (fila, columna) in self.blancos_pendientes:
-                self.blancos_pendientes.remove((fila, columna))
-                if (fila, columna) in self.direcciones_probadas:
-                    del self.direcciones_probadas[(fila, columna)]
-            
-            # Remover blancos pendientes cercanos que probablemente eran parte del mismo barco
-            blancos_a_remover = []
-            for blanco in self.blancos_pendientes:
-                bf, bc = blanco
-                # Si está en la misma fila o columna y cerca, probablemente era del mismo barco
-                if (bf == fila and abs(bc - columna) <= 3) or (bc == columna and abs(bf - fila) <= 3):
-                    blancos_a_remover.append(blanco)
-            
-            for blanco in blancos_a_remover:
-                if blanco in self.blancos_pendientes:
-                    self.blancos_pendientes.remove(blanco)
-                if blanco in self.direcciones_probadas:
-                    del self.direcciones_probadas[blanco]
+        for blanco in blancos_a_remover:
+            if blanco in blancos_pendientes:
+                blancos_pendientes.remove(blanco)
+            if blanco in direcciones_probadas:
+                del direcciones_probadas[blanco]
 
 # FUNCIONES DE MANEJO DE SEÑALES
 def signal_handler(signum, frame):
     """Maneja las señales de interrupción (Ctrl+C)"""
-    global game_client_instance
+    global connection, connected
+    
     print("\n\nTe has desconectado")
-    if game_client_instance:
+    if connected:
         # Enviar mensaje de desconexión manual al oponente
         try:
-            game_client_instance.send_message({
+            send_message({
                 "tipo": "desconexion", 
                 "razon": "interrupcion_manual",
                 "mensaje": "El enemigo se ha desconectado"
@@ -244,210 +259,214 @@ def signal_handler(signum, frame):
             time.sleep(0.5)  # Dar tiempo para que se envíe
         except:
             pass
-        game_client_instance.close_connection()
+        close_connection()
     sys.exit(0)
 
-# FUNCIONES DE RED (MODIFICADAS)
-class GameClient:
-    def __init__(self):
-        self.session_id = str(uuid.uuid4())
-        self.is_server = False
-        self.connection = None
-        self.connected = False
-        self.broadcast_socket = None
-        self.game_socket = None
-        self.reconnect_attempts = 0
-        self.game_active = True
-        self.ia_jugador = IA_Jugador()
-        
-    def get_local_ip(self):
-        """Obtiene la IP local de la máquina"""
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                return s.getsockname()[0]
-        except:
-            return "127.0.0.1"
-    
-    def send_broadcast(self):
-        """Envía mensajes de broadcast para encontrar oponentes"""
-        try:
-            self.broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            self.broadcast_socket.settimeout(1)
-            
-            broadcast_data = {
-                "message": BROADCAST_MESSAGE,
-                "session_id": self.session_id,
-                "ip": self.get_local_ip(),
-                "port": GAME_PORT
-            }
-            
-            while not self.connected and self.game_active:
-                try:
-                    message = json.dumps(broadcast_data).encode()
-                    self.broadcast_socket.sendto(message, ('<broadcast>', BROADCAST_PORT))
-                    print("Buscando oponentes en la red...")
-                    time.sleep(5)
-                except socket.error as e:
-                    if "bloqueado" in str(e) or "blocked" in str(e):
-                        print(f"Error: Puerto {BROADCAST_PORT} bloqueado. Verifica tu firewall")
-                        break
-                    else:
-                        print(f"Error enviando broadcast: {e}")
-                        time.sleep(5)
-        except Exception as e:
-            print(f"Error configurando broadcast: {e}")
-        finally:
-            if self.broadcast_socket:
-                self.broadcast_socket.close()
-    
-    def listen_for_broadcast(self):
-        """Escucha mensajes de broadcast de otros jugadores"""
-        try:
-            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listen_socket.bind(('', BROADCAST_PORT))
-            listen_socket.settimeout(1)
-            
-            print("Esperando jugadores en la red...")
-            
-            while not self.connected and self.game_active:
-                try:
-                    data, addr = listen_socket.recvfrom(1024)
-                    message = json.loads(data.decode())
-                    
-                    if (message.get("message") == BROADCAST_MESSAGE and 
-                        message.get("session_id") != self.session_id):
-                        
-                        print(f"Oponente encontrado en {addr[0]}")
-                        
-                        # Decidir quién será servidor usando session_id
-                        if self.session_id > message.get("session_id"):
-                            self.is_server = True
-                            self.start_server()
-                        else:
-                            self.connect_to_server(message.get("ip"), message.get("port"))
-                        
-                        break
-                        
-                except socket.timeout:
-                    continue
-                except json.JSONDecodeError:
-                    continue
-                except Exception as e:
-                    print(f"Error escuchando broadcasts: {e}")
-                    
-        except Exception as e:
-            print(f"Error configurando listener: {e}")
-        finally:
-            listen_socket.close()
-    
-    def start_server(self):
-        """Inicia el servidor de juego"""
-        try:
-            self.game_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.game_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.game_socket.bind(('', GAME_PORT))
-            self.game_socket.listen(1)
-            
-            print("Esperando conexión del oponente...")
-            self.connection, addr = self.game_socket.accept()
-            self.connection.settimeout(TIMEOUT_CONNECTION)
-            
-            print(f"Oponente conectado desde {addr[0]}")
-            self.connected = True
-            
-        except Exception as e:
-            print(f"Error iniciando servidor: {e}")
-            self.connected = False
-    
-    def connect_to_server(self, server_ip, server_port):
-        """Se conecta al servidor de juego"""
-        try:
-            self.connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.connection.settimeout(TIMEOUT_CONNECTION)
-            self.connection.connect((server_ip, server_port))
-            
-            print(f"Conectado al oponente en {server_ip}:{server_port}")
-            self.connected = True
-            
-        except Exception as e:
-            print(f"Error conectando al servidor: {e}")
-            self.connected = False
-    
-    def send_message(self, message):
-        """Envía un mensaje al oponente"""
-        try:
-            if self.connection:
-                data = json.dumps(message).encode()
-                self.connection.send(data)
-                return True
-        except Exception as e:
-            print(f"Error enviando mensaje: {e}")
-            self.handle_disconnection()
-            return False
-        return False
-    
-    def receive_message(self, timeout=TIMEOUT_TURNO):
-        """Recibe un mensaje del oponente"""
-        try:
-            if self.connection:
-                self.connection.settimeout(timeout)
-                data = self.connection.recv(1024)
-                if data:
-                    message = json.loads(data.decode())
-                    
-                    # Verificar si es un mensaje de desconexión
-                    if message.get("tipo") == "desconexion":
-                        if message.get("razon") == "interrupcion_manual":
-                            print(message.get("mensaje", "El enemigo se ha desconectado"))
-                        else:
-                            print("El oponente se ha desconectado")
-                        self.handle_disconnection()
-                        return None
-                    
-                    return message
-                else:
-                    # Conexión cerrada por el otro lado
-                    self.handle_disconnection()
-                    return None
-        except socket.timeout:
-            print("Timeout: El oponente no respondió a tiempo")
-            self.handle_disconnection()
-            return None
-        except Exception as e:
-            print(f"Error recibiendo mensaje: {e}")
-            self.handle_disconnection()
-            return None
-        return None
-    
-    def handle_disconnection(self):
-        """Maneja la desconexión del oponente"""
-        if self.connected:
-            print("¡La conexión se ha perdido!")
-        self.connected = False
-        self.game_active = False
-        if self.connection:
-            self.connection.close()
-    
-    def close_connection(self):
-        """Cierra la conexión intencionalmente"""
-        print("Cerrando conexión...")
-        self.connected = False
-        self.game_active = False
-        if self.connection:
-            try:
-                # Enviar mensaje de desconexión intencional
-                self.send_message({"tipo": "desconexion", "razon": "juego_terminado"})
-                time.sleep(0.5)  # Dar tiempo para que se envíe
-            except:
-                pass
-            self.connection.close()
-        if self.game_socket:
-            self.game_socket.close()
+# FUNCIONES DE RED
+def get_local_ip():
+    """Obtiene la IP local de la máquina"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except:
+        return "127.0.0.1"
 
-# FUNCIONES DE JUEGO EN RED (MODIFICADAS)
+def send_broadcast():
+    """Envía mensajes de broadcast para encontrar oponentes"""
+    global broadcast_socket, session_id, connected, game_active
+    
+    try:
+        broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        broadcast_socket.settimeout(1)
+        
+        broadcast_data = {
+            "message": BROADCAST_MESSAGE,
+            "session_id": session_id,
+            "ip": get_local_ip(),
+            "port": GAME_PORT
+        }
+        
+        while not connected and game_active:
+            try:
+                message = json.dumps(broadcast_data).encode()
+                broadcast_socket.sendto(message, ('<broadcast>', BROADCAST_PORT))
+                print("Buscando oponentes en la red...")
+                time.sleep(5)
+            except socket.error as e:
+                if "bloqueado" in str(e) or "blocked" in str(e):
+                    print(f"Error: Puerto {BROADCAST_PORT} bloqueado. Verifica tu firewall")
+                    break
+                else:
+                    print(f"Error enviando broadcast: {e}")
+                    time.sleep(5)
+    except Exception as e:
+        print(f"Error configurando broadcast: {e}")
+    finally:
+        if broadcast_socket:
+            broadcast_socket.close()
+
+def listen_for_broadcast():
+    """Escucha mensajes de broadcast de otros jugadores"""
+    global connected, game_active, session_id, is_server
+    
+    try:
+        listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_socket.bind(('', BROADCAST_PORT))
+        listen_socket.settimeout(1)
+        
+        print("Esperando jugadores en la red...")
+        
+        while not connected and game_active:
+            try:
+                data, addr = listen_socket.recvfrom(1024)
+                message = json.loads(data.decode())
+                
+                if (message.get("message") == BROADCAST_MESSAGE and 
+                    message.get("session_id") != session_id):
+                    
+                    print(f"Oponente encontrado en {addr[0]}")
+                    
+                    # Decidir quién será servidor usando session_id
+                    if session_id > message.get("session_id"):
+                        is_server = True
+                        start_server()
+                    else:
+                        connect_to_server(message.get("ip"), message.get("port"))
+                    
+                    break
+                    
+            except socket.timeout:
+                continue
+            except json.JSONDecodeError:
+                continue
+            except Exception as e:
+                print(f"Error escuchando broadcasts: {e}")
+                
+    except Exception as e:
+        print(f"Error configurando listener: {e}")
+    finally:
+        listen_socket.close()
+
+def start_server():
+    """Inicia el servidor de juego"""
+    global game_socket, connection, connected
+    
+    try:
+        game_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        game_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        game_socket.bind(('', GAME_PORT))
+        game_socket.listen(1)
+        
+        print("Esperando conexión del oponente...")
+        connection, addr = game_socket.accept()
+        connection.settimeout(TIMEOUT_CONNECTION)
+        
+        print(f"Oponente conectado desde {addr[0]}")
+        connected = True
+        
+    except Exception as e:
+        print(f"Error iniciando servidor: {e}")
+        connected = False
+
+def connect_to_server(server_ip, server_port):
+    """Se conecta al servidor de juego"""
+    global connection, connected
+    
+    try:
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        connection.settimeout(TIMEOUT_CONNECTION)
+        connection.connect((server_ip, server_port))
+        
+        print(f"Conectado al oponente en {server_ip}:{server_port}")
+        connected = True
+        
+    except Exception as e:
+        print(f"Error conectando al servidor: {e}")
+        connected = False
+
+def send_message(message):
+    """Envía un mensaje al oponente"""
+    global connection, connected
+    
+    try:
+        if connection:
+            data = json.dumps(message).encode()
+            connection.send(data)
+            return True
+    except Exception as e:
+        print(f"Error enviando mensaje: {e}")
+        handle_disconnection()
+        return False
+    return False
+
+def receive_message(timeout=TIMEOUT_TURNO):
+    """Recibe un mensaje del oponente"""
+    global connection, connected, game_active
+    
+    try:
+        if connection:
+            connection.settimeout(timeout)
+            data = connection.recv(1024)
+            if data:
+                message = json.loads(data.decode())
+                
+                # Verificar si es un mensaje de desconexión
+                if message.get("tipo") == "desconexion":
+                    if message.get("razon") == "interrupcion_manual":
+                        print(message.get("mensaje", "El enemigo se ha desconectado"))
+                    else:
+                        print("El oponente se ha desconectado")
+                    handle_disconnection()
+                    return None
+                
+                return message
+            else:
+                # Conexión cerrada por el otro lado
+                handle_disconnection()
+                return None
+    except socket.timeout:
+        print("Timeout: El oponente no respondió a tiempo")
+        handle_disconnection()
+        return None
+    except Exception as e:
+        print(f"Error recibiendo mensaje: {e}")
+        handle_disconnection()
+        return None
+    return None
+
+def handle_disconnection():
+    """Maneja la desconexión del oponente"""
+    global connected, game_active, connection
+    
+    if connected:
+        print("¡La conexión se ha perdido!")
+    connected = False
+    game_active = False
+    if connection:
+        connection.close()
+
+def close_connection():
+    """Cierra la conexión intencionalmente"""
+    global connected, game_active, connection, game_socket
+    
+    print("Cerrando conexión...")
+    connected = False
+    game_active = False
+    if connection:
+        try:
+            # Enviar mensaje de desconexión intencional
+            send_message({"tipo": "desconexion", "razon": "juego_terminado"})
+            time.sleep(0.5)  # Dar tiempo para que se envíe
+        except:
+            pass
+        connection.close()
+    if game_socket:
+        game_socket.close()
+
+# FUNCIONES DE JUEGO EN RED
 def validar_coordenada(x, y):
     """Valida que las coordenadas estén en el rango correcto (1-10)"""
     try:
@@ -464,8 +483,10 @@ def indices_a_coordenada(fila, columna):
     """Convierte índices del tablero (0-9) a coordenadas del protocolo (1-10)"""
     return columna + 1, fila + 1
 
-def sincronizar_tableros(client):
+def sincronizar_tableros():
     """Sincroniza el tamaño de los tableros entre jugadores"""
+    global is_server
+    
     print("Sincronizando configuración del juego...")
     
     config = {
@@ -474,13 +495,13 @@ def sincronizar_tableros(client):
         "barcos": BARCOS
     }
     
-    if client.is_server:
+    if is_server:
         # Servidor envía primero
-        if not client.send_message(config):
+        if not send_message(config):
             return False
         
         # Recibe configuración del cliente
-        client_config = client.receive_message()
+        client_config = receive_message()
         if not client_config:
             return False
         
@@ -491,7 +512,7 @@ def sincronizar_tableros(client):
             return False
     else:
         # Cliente recibe primero
-        server_config = client.receive_message()
+        server_config = receive_message()
         if not server_config:
             return False
         
@@ -502,7 +523,7 @@ def sincronizar_tableros(client):
             return False
         
         # Envía su configuración
-        if not client.send_message(config):
+        if not send_message(config):
             return False
     
     print("Tableros sincronizados correctamente")
@@ -547,32 +568,33 @@ def procesar_ataque_red(tablero_propio, x, y):
     else:
         return {"resultado": "impacto", "victoria": False}
 
-def realizar_ataque_red(client, x, y):
+def realizar_ataque_red(x, y):
     """Envía un ataque por red y recibe la respuesta"""
     if not validar_coordenada(x, y):
         return {"error": "coordenada_invalida"}
     
     ataque = {"x": x, "y": y}
     
-    if not client.send_message(ataque):
+    if not send_message(ataque):
         return {"error": "conexion_perdida"}
     
-    respuesta = client.receive_message()
+    respuesta = receive_message()
     if not respuesta:
         return {"error": "timeout"}
     
     return respuesta
 
-def generar_disparo_automatico(ia_jugador):
+def generar_disparo_automatico():
     """Genera un disparo automatico usando la IA"""
-    return ia_jugador.generar_disparo_inteligente()
+    return generar_disparo_inteligente()
 
-# FUNCIÓN PRINCIPAL DE JUEGO EN RED (MODIFICADA)
+# FUNCIÓN PRINCIPAL DE JUEGO EN RED
 def juego_red():
     """Función principal que maneja el juego en red"""
-    global game_client_instance
-    client = GameClient()
-    game_client_instance = client
+    global connected, game_active, is_server, session_id, disparos_realizados
+    
+    # Reiniciar variables globales
+    disparos_realizados = set()
     
     # Configurar manejador de señales
     signal.signal(signal.SIGINT, signal_handler)
@@ -582,8 +604,8 @@ def juego_red():
     print("Buscando oponentes automáticamente...")
     
     # Ejecutar broadcast y listener en paralelo
-    broadcast_thread = threading.Thread(target=client.send_broadcast)
-    listen_thread = threading.Thread(target=client.listen_for_broadcast)
+    broadcast_thread = threading.Thread(target=send_broadcast)
+    listen_thread = threading.Thread(target=listen_for_broadcast)
     
     broadcast_thread.daemon = True
     listen_thread.daemon = True
@@ -592,15 +614,15 @@ def juego_red():
     listen_thread.start()
     
     # Esperar hasta que se establezca conexión
-    while not client.connected and client.game_active:
+    while not connected and game_active:
         time.sleep(0.1)
     
-    if not client.game_active:
+    if not game_active:
         return
     
     try:
         # Sincronizar tableros
-        if not sincronizar_tableros(client):
+        if not sincronizar_tableros():
             print("Error en la sincronización. Cerrando juego.")
             return
         
@@ -614,23 +636,23 @@ def juego_red():
         imprimir_tablero(tablero_propio)
         
         # Determinar quién empieza (el servidor siempre va primero)
-        mi_turno = client.is_server
+        mi_turno = is_server
         
-        while client.game_active:
+        while game_active:
             if mi_turno:
                 print("\n--- TU TURNO ---")
                 print("Tablero enemigo (lo que conoces):")
                 imprimir_tablero(tablero_enemigo)
                 
                 # Generar disparo automático
-                x, y = generar_disparo_automatico(client.ia_jugador)
+                x, y = generar_disparo_automatico()
                 print(f"Disparando automáticamente en {x},{y}...")
                 
                 # Pausa para observar el juego
                 time.sleep(TIEMPO_ENTRE_DISPAROS)
                 
                 # Enviar ataque
-                respuesta = realizar_ataque_red(client, x, y)
+                respuesta = realizar_ataque_red(x, y)
                 
                 if "error" in respuesta:
                     if respuesta["error"] in ["conexion_perdida", "timeout"]:
@@ -645,7 +667,7 @@ def juego_red():
                 resultado = respuesta.get("resultado")
                 
                 # Actualizar IA con el resultado
-                client.ia_jugador.procesar_resultado_disparo(x, y, resultado)
+                procesar_resultado_disparo(x, y, resultado)
                 
                 if resultado == "ya_disparado":
                     print("Ya habías disparado ahí")
@@ -671,7 +693,7 @@ def juego_red():
                 # Verificar victoria
                 if respuesta.get("victoria"):
                     print("\n¡VICTORIA! Has hundido toda la flota enemiga!")
-                    client.close_connection()
+                    close_connection()
                     return
                     
             else:
@@ -679,7 +701,7 @@ def juego_red():
                 print("Esperando ataque...")
                 
                 # Recibir ataque
-                ataque = client.receive_message()
+                ataque = receive_message()
                 if not ataque:
                     print("El oponente se ha desconectado")
                     return
@@ -691,7 +713,7 @@ def juego_red():
                 respuesta = procesar_ataque_red(tablero_propio, x, y)
                 
                 # Enviar respuesta
-                if not client.send_message(respuesta):
+                if not send_message(respuesta):
                     return
                 
                 # Mostrar resultado
@@ -712,19 +734,19 @@ def juego_red():
                 # Verificar derrota
                 if respuesta.get("victoria"):
                     print("\n¡DERROTA! El oponente hundió toda tu flota!")
-                    client.close_connection()
+                    close_connection()
                     return
     
     except KeyboardInterrupt:
         print("\nJuego interrumpido por el usuario")
-        client.close_connection()
+        close_connection()
     except Exception as e:
         print(f"Error durante el juego: {e}")
-        client.close_connection()
+        close_connection()
     finally:
         # Asegurar que la conexión se cierre
-        if client.connected:
-            client.close_connection()
+        if connected:
+            close_connection()
 
 # FUNCIÓN PRINCIPAL (MODIFICADA)
 def main():
