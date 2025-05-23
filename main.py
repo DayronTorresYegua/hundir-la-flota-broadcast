@@ -24,9 +24,9 @@ LETRAS_A_NUMEROS = {
 }
 NUMEROS_A_LETRAS = {v: k for k, v in LETRAS_A_NUMEROS.items()}
 
-# CONSTANTES DE RED
-BROADCAST_PORT = 5000
-GAME_PORT = 5001
+# CONSTANTES DE RED - PUERTOS MODIFICADOS
+BROADCAST_PORT = 6969  # Puerto del servidor
+GAME_PORT = 7171       # Puerto del cliente
 BROADCAST_MESSAGE = "HUNDIR_FLOTA_DISPONIBLE"
 TIMEOUT_TURNO = 30
 TIMEOUT_CONNECTION = 10
@@ -747,7 +747,7 @@ def juego_red():
         # Asegurar que la conexión se cierre
         if connected:
             close_connection()
-
+            
 # FUNCIÓN PRINCIPAL (MODIFICADA)
 def main():
     """Función principal que inicia el juego"""
