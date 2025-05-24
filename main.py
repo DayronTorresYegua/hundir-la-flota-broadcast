@@ -748,7 +748,7 @@ def juego_red():
         if connected:
             close_connection()
             
-# FUNCIÓN PRINCIPAL (MODIFICADA)
+# FUNCIÓN PRINCIPAL
 def main():
     """Función principal que inicia el juego"""
     try:
